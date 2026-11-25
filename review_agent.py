@@ -87,7 +87,8 @@ BLUR_THRESHOLD = 600.0     # Edge-strength score below this suggests blur.
 #       "r_output": {"code": [str], "results": [str], "warnings": [str], "errors": [str]},
 #       "quality_issues": [{"type", "description"}],
 #       "unreadable_elements": [str],
-#       "overall_confidence": "high" | "medium" | "low",
+#       "overall_confidence": "high" | "medium" | "low",  # forced to "low" when
+#                                       # the local check flags blur
 #       "summary": str,
 #   },
 #   "model": str,                      # model name used for the request
@@ -199,6 +200,13 @@ Rules:
 - Never invent or estimate a title, label, unit, legend entry, or number that you cannot read.
   Use null (or an empty list) for anything not shown, and add it to unreadable_elements or
   quality_issues when it is present but illegible.
+- Only record text you can read with certainty, character by character. If any character of
+  a label or number is uncertain (small, blurry, or pixelated text), do NOT record a best
+  guess: set the field to null, leave the value out of statistical_values, and describe it
+  in unreadable_elements (e.g. "correlation annotation in upper left, digits illegible").
+- Never infer a label, unit, or variable name from the title, the chart type, or what
+  would be typical. An axis label you cannot read is null even if the title suggests one.
+- Do not mention annotations, text, or values that are not visible in the image.
 - Copy statistical values exactly as printed (e.g. "r = 0.82", "p-value: < 2.2e-16").
   Do not compute new statistics. Approximate readings from a plot are allowed only in trends
   or outliers and must be marked as approximate (e.g. "peak near x = 40 (approximate)").
@@ -340,6 +348,11 @@ def build_messages(pages, quality_checks, pdf_text=None) -> list:
             f"Page {i}: {check['width']}x{check['height']} px; "
             f"automatic quality flags: {', '.join(check['flags']) or 'none'}."
         )
+        if check["flags"]:
+            context.append(
+                f"Page {i} was flagged as degraded. Small text and numbers on it are likely "
+                "illegible: record them as unreadable unless every character is clear."
+            )
     if pdf_text:
         # The text layer gives exact characters for R output saved as PDF.
         context.append("Text embedded in the PDF (use it to read values exactly):\n"
@@ -424,7 +437,42 @@ def analyze_evidence(file_bytes: bytes, filename: str, mime_type: str | None = N
     except (TypeError, json.JSONDecodeError):
         return _error_result("The model returned an incomplete response. Please try again.",
                              filename, model)
+    apply_quality_safeguards(result["evidence"], quality_checks)
     return result
+
+
+_PLACEHOLDER_VALUES = {"", "illegible", "unreadable", "unknown", "not readable", "n/a", "?"}
+
+
+def apply_quality_safeguards(evidence: dict, quality_checks: list) -> dict:
+    """Apply code-level checks that do not rely on the model following its prompt.
+
+    Input:  the model's evidence dict and the local quality checks.
+    Output: the same evidence dict, modified in place and returned:
+        - statistical_values whose value is a placeholder such as "illegible"
+          are moved to unreadable_elements.
+        - if any page was flagged "possibly_blurry", overall_confidence is set
+          to "low" and a quality issue is added, because live testing showed
+          the model can still misread or guess values on blurred images.
+    """
+    kept = []
+    for stat in evidence["statistical_values"]:
+        if stat["value"].strip().strip("<>").strip().lower() in _PLACEHOLDER_VALUES:
+            evidence["unreadable_elements"].append(f"{stat['name']} (value illegible)")
+        else:
+            kept.append(stat)
+    evidence["statistical_values"] = kept
+
+    blurry_pages = [c["page"] for c in quality_checks if "possibly_blurry" in c["flags"]]
+    if blurry_pages:
+        evidence["overall_confidence"] = "low"
+        pages = ", ".join(str(p) for p in blurry_pages)
+        evidence["quality_issues"].append({
+            "type": "blurry",
+            "description": f"Automatic check found page(s) {pages} blurry. Labels and values "
+                           "read from this file may be inaccurate; upload a clearer image.",
+        })
+    return evidence
 
 
 def evidence_to_text(result: dict) -> str:
