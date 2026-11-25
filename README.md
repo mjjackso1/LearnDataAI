@@ -19,4 +19,15 @@ streamlit run app.py
 | course_materials.py | Shared coordination | Dec 2 |
 | tests/README.md | All members | Dec 4 |
 
+## OpenAI API key (Review Agent)
+
+Locally, create `.streamlit/secrets.toml` (already in `.gitignore`):
+
+```toml
+OPENAI_API_KEY = "your-key"
+# OPENAI_MODEL = "gpt-5.4-mini"   # optional override
+```
+
+On Streamlit Community Cloud, add the same lines under the app's **Settings → Secrets**. An `OPENAI_API_KEY` environment variable also works.
+
 Final integration and presentation: December 6. Keep API keys in Streamlit secrets or environment variables, never in Git. The UI is runnable; backend modules are intentionally placeholders.

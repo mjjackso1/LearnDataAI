@@ -1,4 +1,8 @@
+import hashlib
+
 import streamlit as st
+
+from review_agent import analyze_evidence, evidence_to_text
 
 # UI owner: Mera Singh. Backend integration points are marked below.
 
@@ -66,7 +70,44 @@ elif page == "Review Agent":
             if not file or not interpretation.strip():
                 st.warning("Add a chart and an interpretation first.")
             else:
-                st.info("Submission captured in the interface. Connect the Review Agent to generate feedback.")
+                # Mack: evidence analysis. Reuse the result if the same file is resubmitted.
+                file_bytes = file.getvalue()
+                file_key = hashlib.sha256(file_bytes).hexdigest()
+                cached = st.session_state.get("review_evidence")
+                if not cached or cached.get("file_key") != file_key or cached["status"] != "ok":
+                    with st.spinner("Analyzing chart evidence..."):
+                        cached = analyze_evidence(file_bytes, file.name, file.type)
+                        cached["file_key"] = file_key
+                    st.session_state["review_evidence"] = cached
+                # Latonya: call the interpretation evaluation here with
+                # st.session_state["review_evidence"], interpretation, and assignment.
+                if cached["status"] == "ok":
+                    st.info("Evidence extracted. Interpretation feedback will appear once evaluation is connected.")
+
+    # Mack: show the extracted evidence for the current upload.
+    result = st.session_state.get("review_evidence")
+    if file and result and result.get("file_key") == hashlib.sha256(file.getvalue()).hexdigest():
+        st.divider()
+        st.subheader("Evidence")
+        if result["status"] != "ok":
+            st.error(result["error"])
+        else:
+            ev = result["evidence"]
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Content", ev["content_type"].replace("_", " ").title())
+            m2.metric("Chart type", (ev["chart_type"] or "None").title())
+            m3.metric("Confidence", ev["overall_confidence"].title())
+            st.write(ev["summary"])
+            issues = [f"**{q['type'].replace('_', ' ')}**: {q['description']}" for q in ev["quality_issues"]]
+            issues += [f"**unreadable**: {item}" for item in ev["unreadable_elements"]]
+            issues += [f"**page {c['page']}**: automatic check flagged {flag.replace('_', ' ')}"
+                       for c in result["local_quality_checks"] for flag in c["flags"]]
+            if issues:
+                st.warning("Some details could not be confirmed from the file:\n\n- " + "\n- ".join(issues))
+            with st.expander("Extracted details"):
+                st.code(evidence_to_text(result), language="text")
+            with st.expander("Structured evidence (JSON)"):
+                st.json({k: v for k, v in result.items() if k != "file_key"})
 
 # Lakeitha Beal: connect coaching_agent.py here.
 elif page == "Coaching Agent":
