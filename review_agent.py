@@ -88,7 +88,10 @@ BLUR_THRESHOLD = 600.0     # Edge-strength score below this suggests blur.
 #       "quality_issues": [{"type", "description"}],
 #       "unreadable_elements": [str],
 #       "overall_confidence": "high" | "medium" | "low",  # forced to "low" when
-#                                       # the local check flags blur or low resolution
+#                                       # the local check flags blur or low resolution.
+#   On blurry files, title, axis label/units/range, and statistical_values
+#   are None/empty and their possible readings are listed in
+#   unreadable_elements as "(unverified, image blurry)".
 #       "summary": str,
 #   },
 #   "model": str,                      # model name used for the request
@@ -441,6 +444,25 @@ def analyze_evidence(file_bytes: bytes, filename: str, mime_type: str | None = N
     return result
 
 
+def _withhold_text_readings(evidence: dict) -> None:
+    """Move text read from a blurry file out of the evidence (see apply_quality_safeguards)."""
+    unverified = evidence["unreadable_elements"]
+    if evidence["title"]:
+        unverified.append(f"title: possibly '{evidence['title']}' (unverified, image blurry)")
+        evidence["title"] = None
+    for axis in evidence["axes"]:
+        for field in ("label", "units", "range"):
+            if axis[field]:
+                unverified.append(f"{axis['axis']}-axis {field}: possibly '{axis[field]}' "
+                                  "(unverified, image blurry)")
+                axis[field] = None
+    for stat in evidence["statistical_values"]:
+        unverified.append(f"{stat['name']}: possibly '{stat['value']}' (unverified, image blurry)")
+    evidence["statistical_values"] = []
+    evidence["summary"] = ("The image is blurry, so any title, labels, or numbers mentioned here "
+                           "could not be verified. " + evidence["summary"])
+
+
 _PLACEHOLDER_VALUES = {"", "illegible", "unreadable", "unknown", "not readable", "n/a", "?"}
 
 
@@ -455,6 +477,12 @@ def apply_quality_safeguards(evidence: dict, quality_checks: list) -> dict:
           overall_confidence is set to "low" and a quality issue is added,
           because live testing showed the model can still guess labels and
           values on blurred or very small images.
+        - if any page was flagged "possibly_blurry", text the model read from
+          the file (title, axis labels/units/ranges, statistical values) is
+          moved to unreadable_elements marked "unverified", so it is never
+          treated as evidence, and the summary starts with a note that names
+          and numbers in it are unverified. Visual trends and outliers are
+          kept. Evidence is not split by page, so this applies to the whole file.
     """
     kept = []
     for stat in evidence["statistical_values"]:
@@ -463,6 +491,9 @@ def apply_quality_safeguards(evidence: dict, quality_checks: list) -> dict:
         else:
             kept.append(stat)
     evidence["statistical_values"] = kept
+
+    if any("possibly_blurry" in c["flags"] for c in quality_checks):
+        _withhold_text_readings(evidence)
 
     for flag, issue_type, wording in [("possibly_blurry", "blurry", "blurry"),
                                       ("low_resolution", "low_resolution", "very low resolution")]:
