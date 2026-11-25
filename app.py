@@ -100,8 +100,6 @@ elif page == "Review Agent":
             st.write(ev["summary"])
             issues = [f"**{q['type'].replace('_', ' ')}**: {q['description']}" for q in ev["quality_issues"]]
             issues += [f"**unreadable**: {item}" for item in ev["unreadable_elements"]]
-            issues += [f"**page {c['page']}**: automatic check flagged {flag.replace('_', ' ')}"
-                       for c in result["local_quality_checks"] for flag in c["flags"]]
             if issues:
                 st.warning("Some details could not be confirmed from the file:\n\n- " + "\n- ".join(issues))
             with st.expander("Extracted details"):
