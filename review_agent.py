@@ -88,7 +88,7 @@ BLUR_THRESHOLD = 600.0     # Edge-strength score below this suggests blur.
 #       "quality_issues": [{"type", "description"}],
 #       "unreadable_elements": [str],
 #       "overall_confidence": "high" | "medium" | "low",  # forced to "low" when
-#                                       # the local check flags blur
+#                                       # the local check flags blur or low resolution
 #       "summary": str,
 #   },
 #   "model": str,                      # model name used for the request
@@ -451,9 +451,10 @@ def apply_quality_safeguards(evidence: dict, quality_checks: list) -> dict:
     Output: the same evidence dict, modified in place and returned:
         - statistical_values whose value is a placeholder such as "illegible"
           are moved to unreadable_elements.
-        - if any page was flagged "possibly_blurry", overall_confidence is set
-          to "low" and a quality issue is added, because live testing showed
-          the model can still misread or guess values on blurred images.
+        - if any page was flagged "possibly_blurry" or "low_resolution",
+          overall_confidence is set to "low" and a quality issue is added,
+          because live testing showed the model can still guess labels and
+          values on blurred or very small images.
     """
     kept = []
     for stat in evidence["statistical_values"]:
@@ -463,15 +464,17 @@ def apply_quality_safeguards(evidence: dict, quality_checks: list) -> dict:
             kept.append(stat)
     evidence["statistical_values"] = kept
 
-    blurry_pages = [c["page"] for c in quality_checks if "possibly_blurry" in c["flags"]]
-    if blurry_pages:
-        evidence["overall_confidence"] = "low"
-        pages = ", ".join(str(p) for p in blurry_pages)
-        evidence["quality_issues"].append({
-            "type": "blurry",
-            "description": f"Automatic check found page(s) {pages} blurry. Labels and values "
-                           "read from this file may be inaccurate; upload a clearer image.",
-        })
+    for flag, issue_type, wording in [("possibly_blurry", "blurry", "blurry"),
+                                      ("low_resolution", "low_resolution", "very low resolution")]:
+        pages = [str(c["page"]) for c in quality_checks if flag in c["flags"]]
+        if pages:
+            evidence["overall_confidence"] = "low"
+            evidence["quality_issues"].append({
+                "type": issue_type,
+                "description": f"Automatic check found page(s) {', '.join(pages)} {wording}. "
+                               "Labels and values read from this file may be inaccurate; "
+                               "upload a clearer, larger image.",
+            })
     return evidence
 
 
