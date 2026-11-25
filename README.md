@@ -30,4 +30,4 @@ OPENAI_API_KEY = "your-key"
 
 On Streamlit Community Cloud, add the same lines under the app's **Settings → Secrets**. An `OPENAI_API_KEY` environment variable also works.
 
-Final integration and presentation: December 6. Keep API keys in Streamlit secrets or environment variables, never in Git. The UI is runnable; backend modules are intentionally placeholders.
+Final integration and presentation: December 6. Keep API keys in Streamlit secrets or environment variables, never in Git. The UI is runnable. In review_agent.py, evidence analysis (Mack Jackson) is implemented and connected to the Review Agent page; interpretation evaluation (Latonya Smith) and the other backend modules are still placeholders.

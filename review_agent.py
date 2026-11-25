@@ -9,13 +9,14 @@ The Review Agent has two halves:
       sends it to the OpenAI multimodal API, and returns a structured
       "evidence" dictionary describing only what is visible in the file.
 
-  PART 2 - INTERPRETATION EVALUATION (Latonya Smith)  <- placeholder section at
-      the bottom of this file. Compares the student's interpretation against
-      the evidence and the instructor rubric.
+  PART 2 - INTERPRETATION EVALUATION (Latonya Smith)  <- not yet implemented;
+      reserved section at the bottom of this file. Will compare the student's
+      interpretation against the evidence and the instructor rubric.
 
 Public entry point for Part 1:
 
-    analyze_evidence(file_bytes, filename, mime_type=None) -> dict
+    analyze_evidence(file_bytes, filename, mime_type=None,
+                     client=None, model=None) -> dict
 
 See EVIDENCE CONTRACT below for the exact shape of the returned dictionary.
 
@@ -50,24 +51,30 @@ BLUR_THRESHOLD = 600.0     # Edge-strength score below this suggests blur.
 # -----------------------------------------------------------------------------
 # EVIDENCE CONTRACT (what analyze_evidence returns)
 #
-# Latonya: this is the dictionary your evaluation functions receive. Every key
-# is always present. Lists may be empty and strings may be None when something
-# is not shown or cannot be read; the model is instructed never to guess.
+# Latonya: this is the dictionary your evaluation functions receive. Every
+# top-level key is always present, on success and on error. Inside "evidence",
+# lists may be empty and fields marked "| None" are None when something is not
+# shown or cannot be read; the model is instructed never to guess.
 #
 # {
 #   "status": "ok" | "error",
 #   "error": str | None,               # message when status == "error"
 #   "source": {
 #       "filename": str,
-#       "file_kind": "image" | "pdf",
-#       "pages_analyzed": int,          # 1 for images
-#       "pdf_text": str | None,         # embedded PDF text (useful for R output)
+#       "file_kind": "image" | "pdf" | None,   # None on error
+#       "pages_analyzed": int,          # 1 for images, up to MAX_PDF_PAGES
+#                                       # for PDFs, 0 on error
+#       "pdf_text": str | None,         # embedded PDF text (useful for R output);
+#                                       # None for images and scanned PDFs
 #   },
-#   "local_quality_checks": [           # computed without the API (Pillow)
+#   "local_quality_checks": [           # computed without the API (Pillow);
+#                                       # empty list on error
 #       {"page": int, "width": int, "height": int,
-#        "sharpness_score": float, "flags": [str, ...]}
+#        "sharpness_score": float,
+#        "flags": [str, ...]}           # "low_resolution", "possibly_blurry"
 #   ],
-#   "evidence": {                       # produced by the model; see
+#   "evidence": {                       # produced by the model; enforced by
+#                                       # EVIDENCE_SCHEMA below
 #       "content_type": "chart" | "r_output" | "chart_and_r_output" | "other" | "unreadable",
 #       "chart_type": str | None,       # e.g. "scatterplot", "histogram"
 #       "title": str | None,
@@ -83,10 +90,12 @@ BLUR_THRESHOLD = 600.0     # Edge-strength score below this suggests blur.
 #       "overall_confidence": "high" | "medium" | "low",
 #       "summary": str,
 #   },
-#   "model": str,
+#   "model": str,                      # model name used for the request
 # }
 #
-# When status == "error", "evidence" is None and the UI shows the error.
+# When status == "error", "evidence" is None and app.py shows result["error"].
+# app.py also adds a "file_key" (SHA-256 of the upload) to the stored result
+# so it can skip re-analyzing the same file; it is not part of this contract.
 # -----------------------------------------------------------------------------
 
 _NULLABLE_STRING = {"type": ["string", "null"]}
@@ -365,7 +374,8 @@ def analyze_evidence(file_bytes: bytes, filename: str, mime_type: str | None = N
         model:      optional model override; defaults to get_model_name().
     Output:
         The evidence dictionary described in EVIDENCE CONTRACT above.
-        Never raises for user-facing problems; returns status "error" instead.
+        Bad files, a missing API key, and API failures are returned as
+        status "error" with a message instead of raising.
     """
     model = model or get_model_name()
 
