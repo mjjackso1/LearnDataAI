@@ -9,14 +9,20 @@ The Review Agent has two halves:
       sends it to the OpenAI multimodal API, and returns a structured
       "evidence" dictionary describing only what is visible in the file.
 
-  PART 2 - INTERPRETATION EVALUATION (Latonya Smith)  <- not yet implemented;
-      reserved section at the bottom of this file. Will compare the student's
-      interpretation against the evidence and the instructor rubric.
+  PART 2 - INTERPRETATION EVALUATION (Latonya Smith)  <- implemented in this file
+      Compares the student's interpretation against the evidence and the
+      instructor rubric, labels each claim, identifies misconceptions, and
+      returns structured feedback with corrective explanations.
 
 Public entry point for Part 1:
 
     analyze_evidence(file_bytes, filename, mime_type=None,
                      client=None, model=None) -> dict
+
+Public entry point for Part 2:
+
+    evaluate_interpretation(result, interpretation, rubric=None,
+                            assignment_type=None, client=None, model=None) -> dict
 
 See EVIDENCE CONTRACT below for the exact shape of the returned dictionary.
 
@@ -551,8 +557,6 @@ def evidence_to_text(result: dict) -> str:
 # PART 2 - INTERPRETATION EVALUATION (Latonya Smith)
 # =============================================================================
 #
-# Not implemented here; this section is reserved for Latonya.
-#
 # How to consume the evidence:
 #   result = analyze_evidence(file.getvalue(), file.name, file.type)
 #   if result["status"] != "ok": show result["error"] and stop.
@@ -573,3 +577,347 @@ def evidence_to_text(result: dict) -> str:
 # Review Agent page stores the result in st.session_state["review_evidence"];
 # call your evaluation function there with that result, the interpretation
 # text, and the assignment type.
+
+import re
+
+# Placeholder rubric used until instructor rubrics come from Course Materials.
+DEFAULT_RUBRIC = [
+    {"criterion": "Describes the main pattern",
+     "description": "States the direction, strength, and shape of the main trend."},
+    {"criterion": "Uses the evidence accurately",
+     "description": "Labels, units, and any reported values match the chart or output."},
+    {"criterion": "Addresses unusual features",
+     "description": "Mentions outliers, clusters, or R warnings/errors where present."},
+    {"criterion": "Draws appropriate conclusions",
+     "description": "Avoids causal claims and generalizations the data cannot support."},
+]
+
+EVALUATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "claims": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "claim": {"type": "string"},
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["supported", "contradicted",
+                                 "unverifiable", "not_in_evidence"],
+                    },
+                    "evidence_used": _NULLABLE_STRING,
+                    "reason": {"type": "string"},
+                },
+                "required": ["claim", "verdict", "evidence_used", "reason"],
+            },
+        },
+        "omissions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "what_was_missed": {"type": "string"},
+                    "why_it_matters": {"type": "string"},
+                },
+                "required": ["what_was_missed", "why_it_matters"],
+            },
+        },
+        "misconceptions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "misconception": {"type": "string"},
+                    "related_claim": _NULLABLE_STRING,
+                    "correction": {"type": "string"},
+                },
+                "required": ["misconception", "related_claim", "correction"],
+            },
+        },
+        "rubric_scores": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "criterion": {"type": "string"},
+                    "rating": {
+                        "type": "string",
+                        "enum": ["met", "partially_met", "not_met", "cannot_assess"],
+                    },
+                    "comment": {"type": "string"},
+                },
+                "required": ["criterion", "rating", "comment"],
+            },
+        },
+        "feedback": {"type": "string"},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    },
+    "required": ["claims", "omissions", "misconceptions",
+                 "rubric_scores", "feedback", "confidence"],
+}
+
+COMMON_MISCONCEPTIONS = [
+    "correlation implies causation",
+    "using the mean to describe the center of a skewed distribution",
+    "treating outliers as errors to ignore or delete",
+    "treating results as valid while ignoring R warnings or errors",
+    "misreading a log-scale axis or an axis that does not start at zero",
+    "treating a small p-value as proof of a large or important effect",
+    "generalizing beyond the data or population shown",
+    "confusing the strength of a correlation with the steepness of the slope",
+]
+
+EVALUATION_SYSTEM_PROMPT = """You are the interpretation reviewer for an introductory data science course.
+You receive (1) evidence extracted from a student's chart, graph, or R output, (2) the
+instructor's rubric, and (3) the student's written interpretation. Check the interpretation
+against the evidence and the rubric, identify misconceptions, and explain the correct reasoning.
+
+The evidence is the only source of truth about the file. Do not use general knowledge about
+what this kind of chart usually shows, and do not assume anything the evidence does not state.
+
+Claims:
+- Split the interpretation into individual claims. Each claim is one statement about the data,
+  the chart, or what it means. Keep the student's wording where possible.
+- Give each claim one verdict:
+  - supported: the evidence directly agrees with it.
+  - contradicted: the evidence directly disagrees with it. evidence_used must name that evidence.
+  - unverifiable: it depends on something listed under Unreadable elements or Quality issues,
+    or on a value the evidence does not contain. Never mark such a claim contradicted.
+  - not_in_evidence: reasoning, context, or a conclusion the file cannot show (a cause, a
+    recommendation, background knowledge). Judge these through the rubric and misconceptions.
+- evidence_used: the evidence line you compared against, or null if there is none.
+- reason: one sentence explaining the verdict.
+
+Omissions:
+- List important things in the evidence that the student did not mention: outliers, R warnings
+  or errors, a major trend, or a misread axis or unit. Skip minor details.
+
+Misconceptions:
+- For each contradicted claim, omission, or not_in_evidence claim that shows a misunderstanding,
+  name the underlying concept the student got wrong. Common ones in this course:
+""" + "\n".join(f"  - {m}" for m in COMMON_MISCONCEPTIONS) + """
+  Describe it in your own words if none of these fit.
+- correction: 1-3 sentences explaining the correct idea, pointing to the student's own chart
+  or output.
+- related_claim: the claim it came from, or null if it came from an omission.
+- Do not invent misconceptions. A correct interpretation may have none.
+
+Rubric:
+- Rate every rubric criterion as met, partially_met, not_met, or cannot_assess (when the
+  evidence is too unclear to judge it). comment: one sentence.
+- If no rubric is provided, return an empty rubric_scores list.
+
+Feedback:
+- 3-6 sentences addressed to the student as "you". Start with what they did well, then give
+  the most important corrections. Be specific, encouraging, and grounded in the evidence.
+- If the evidence confidence is low, say that parts of the file could not be checked and
+  suggest uploading a clearer file.
+
+Confidence:
+- How reliable your review is. It must never be higher than the evidence confidence.
+"""
+
+
+def _rubric_to_text(rubric) -> str:
+    """Turn a rubric (string, list, or dict) into plain text for the prompt.
+
+    Input:  a string, a list of criteria (strings or dicts), a dict of
+            {criterion: description}, or None.
+    Output: a readable multi-line string.
+    """
+    if not rubric:
+        return "No rubric provided."
+    if isinstance(rubric, str):
+        return rubric.strip()
+    if isinstance(rubric, dict):
+        return "\n".join(f"- {name}: {desc}" for name, desc in rubric.items())
+    lines = []
+    for item in rubric:
+        if isinstance(item, dict):
+            name = item.get("criterion") or item.get("name") or "criterion"
+            desc = item.get("description") or ""
+            lines.append(f"- {name}: {desc}".rstrip(": "))
+        else:
+            lines.append(f"- {item}")
+    return "\n".join(lines)
+
+
+def build_evaluation_messages(result: dict, interpretation: str, rubric=None,
+                              assignment_type: str | None = None) -> list:
+    """Build the chat messages sent to the model for the evaluation.
+
+    Input:  the evidence result from analyze_evidence, the student's
+            interpretation text, the rubric, and the assignment type.
+    Output: a list of chat messages (system prompt + one text user message).
+            No images are sent; the evaluation works from the evidence only.
+    """
+    flags = sorted({flag for check in result.get("local_quality_checks", [])
+                    for flag in check["flags"]})
+    parts = [
+        f"Assignment type: {assignment_type or 'not specified'}",
+        "",
+        "INSTRUCTOR RUBRIC:",
+        _rubric_to_text(rubric),
+        "",
+        "EVIDENCE FROM THE STUDENT'S FILE:",
+        evidence_to_text(result),
+        f"Automatic quality flags: {', '.join(flags) or 'none'}",
+        "",
+        "STUDENT INTERPRETATION:",
+        interpretation.strip(),
+        "",
+        "Review the interpretation according to the schema.",
+    ]
+    return [{"role": "system", "content": EVALUATION_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n".join(parts)}]
+
+
+def _evaluation_error(message: str, model: str) -> dict:
+    return {"status": "error", "error": message, "evaluation": None, "model": model}
+
+
+def evaluate_interpretation(result: dict, interpretation: str, rubric=None,
+                            assignment_type: str | None = None,
+                            client=None, model: str | None = None) -> dict:
+    """Evaluate a student's interpretation against the evidence and rubric.
+
+    Input:
+        result:          the dictionary returned by analyze_evidence.
+        interpretation:  the student's written interpretation.
+        rubric:          the instructor rubric (string, list, or dict), optional.
+        assignment_type: e.g. "scatterplot" or "regression output", optional.
+        client:          optional OpenAI client (used by tests).
+        model:           optional model override; defaults to get_model_name().
+    Output:
+        The dictionary described in EVALUATION CONTRACT above. Missing
+        evidence, an empty interpretation, and API failures are returned as
+        status "error" with a message instead of raising.
+    """
+    model = model or get_model_name()
+
+    if not result or result.get("status") != "ok" or not result.get("evidence"):
+        return _evaluation_error("No evidence is available for this file, so the "
+                                 "interpretation cannot be reviewed.", model)
+    if not interpretation or not interpretation.strip():
+        return _evaluation_error("Please enter your interpretation before submitting.", model)
+
+    if client is None:
+        api_key = get_openai_api_key()
+        if not api_key:
+            return _evaluation_error(
+                "OpenAI API key not configured. Set OPENAI_API_KEY in Streamlit "
+                "secrets or as an environment variable.", model)
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=build_evaluation_messages(result, interpretation, rubric, assignment_type),
+            response_format={"type": "json_schema",
+                             "json_schema": {"name": "interpretation_evaluation",
+                                             "strict": True,
+                                             "schema": EVALUATION_SCHEMA}},
+            max_completion_tokens=8000,
+        )
+    except Exception as exc:  # Network, auth, rate limit, or model errors.
+        return _evaluation_error(f"OpenAI request failed: {exc}", model)
+
+    message = response.choices[0].message
+    if getattr(message, "refusal", None):
+        return _evaluation_error(f"The model declined to review this interpretation: "
+                                 f"{message.refusal}", model)
+    try:
+        evaluation = json.loads(message.content)
+    except (TypeError, json.JSONDecodeError):
+        return _evaluation_error("The model returned an incomplete response. "
+                                 "Please try again.", model)
+
+    apply_evaluation_safeguards(evaluation, result, rubric)
+    return {"status": "ok", "error": None, "evaluation": evaluation, "model": model}
+
+
+_NUMBER_PATTERN = re.compile(r"-?\d*\.?\d+")
+_CONFIDENCE_ORDER = {"low": 0, "medium": 1, "high": 2}
+_LOW_CONFIDENCE_NOTE = ("Some parts of your file could not be read clearly, so parts of "
+                        "this review may be incomplete. ")
+
+
+def _numbers_in(text: str | None) -> set:
+    """Return the set of numbers that appear in a piece of text."""
+    numbers = set()
+    for match in _NUMBER_PATTERN.findall(text or ""):
+        try:
+            numbers.add(float(match))
+        except ValueError:
+            pass
+    return numbers
+
+
+def _verified_numbers(evidence: dict) -> set:
+    """Numbers the evidence actually read (unreadable elements are excluded)."""
+    texts = [stat["value"] for stat in evidence["statistical_values"]]
+    texts += evidence["trends"] + evidence["outliers"] + evidence["r_output"]["results"]
+    texts += [axis["range"] or "" for axis in evidence["axes"]]
+    numbers = set()
+    for text in texts:
+        numbers |= _numbers_in(text)
+    return numbers
+
+
+def apply_evaluation_safeguards(evaluation: dict, result: dict, rubric=None) -> dict:
+    """Apply code-level checks that do not rely on the model following its prompt.
+
+    Input:  the model's evaluation dict, the evidence result, and the rubric.
+    Output: the same evaluation dict, modified in place and returned:
+        - a "contradicted" claim with no evidence cited becomes "unverifiable".
+        - a "contradicted" claim that cites a number the evidence could not
+          read (the file has unreadable elements and the cited evidence has
+          no number) becomes "unverifiable", so students are not marked wrong
+          over values the extractor could not see.
+        - a "supported" claim that cites a number not found in the readable
+          evidence becomes "unverifiable", so the model cannot confirm
+          numbers that were never read.
+        - confidence is capped at the evidence confidence, and set to "low"
+          when the local quality check flagged any page.
+        - when confidence is low, the feedback starts with a note saying
+          parts of the file could not be checked.
+        - rubric_scores is emptied when no rubric was given.
+    """
+    evidence = result["evidence"]
+    verified = _verified_numbers(evidence)
+    has_unreadable = bool(evidence["unreadable_elements"])
+
+    for claim in evaluation["claims"]:
+        unmatched = _numbers_in(claim["claim"]) - verified
+        if claim["verdict"] == "contradicted" and not claim["evidence_used"]:
+            claim["verdict"] = "unverifiable"
+            claim["reason"] += " (Marked unverifiable: no evidence was cited.)"
+        elif (claim["verdict"] == "contradicted" and unmatched and has_unreadable
+              and not _numbers_in(claim["evidence_used"])):
+            claim["verdict"] = "unverifiable"
+            claim["reason"] += (" (Marked unverifiable: the value could not be read "
+                                "from the file.)")
+        elif claim["verdict"] == "supported" and unmatched:
+            claim["verdict"] = "unverifiable"
+            claim["reason"] += (" (Marked unverifiable: the number cited does not appear "
+                                "in the readable evidence.)")
+
+    cap = evidence["overall_confidence"]
+    if any(check["flags"] for check in result.get("local_quality_checks", [])):
+        cap = "low"
+    if _CONFIDENCE_ORDER[evaluation["confidence"]] > _CONFIDENCE_ORDER[cap]:
+        evaluation["confidence"] = cap
+    if evaluation["confidence"] == "low" and not evaluation["feedback"].startswith(
+            _LOW_CONFIDENCE_NOTE):
+        evaluation["feedback"] = _LOW_CONFIDENCE_NOTE + evaluation["feedback"]
+
+    if not rubric:
+        evaluation["rubric_scores"] = []
+    return evaluation
