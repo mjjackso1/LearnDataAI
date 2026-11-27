@@ -2,7 +2,8 @@ import hashlib
 
 import streamlit as st
 
-from review_agent import analyze_evidence, evidence_to_text
+from review_agent import (DEFAULT_RUBRIC, analyze_evidence, evaluate_interpretation,
+                          evidence_to_text)
 
 # UI owner: Mera Singh. Backend integration points are marked below.
 
@@ -79,10 +80,13 @@ elif page == "Review Agent":
                         cached = analyze_evidence(file_bytes, file.name, file.type)
                         cached["file_key"] = file_key
                     st.session_state["review_evidence"] = cached
-                # Latonya: call the interpretation evaluation here with
-                # st.session_state["review_evidence"], interpretation, and assignment.
+                # Latonya: interpretation evaluation against the evidence and rubric.
                 if cached["status"] == "ok":
-                    st.info("Evidence extracted. Interpretation feedback will appear once evaluation is connected.")
+                    with st.spinner("Reviewing your interpretation..."):
+                        review = evaluate_interpretation(cached, interpretation,
+                                                         DEFAULT_RUBRIC, assignment)
+                    review["file_key"] = file_key
+                    st.session_state["review_evaluation"] = review
 
     # Mack: show the extracted evidence for the current upload.
     result = st.session_state.get("review_evidence")
@@ -106,6 +110,43 @@ elif page == "Review Agent":
                 st.code(evidence_to_text(result), language="text")
             with st.expander("Structured evidence (JSON)"):
                 st.json({k: v for k, v in result.items() if k != "file_key"})
+
+        # Latonya: show the interpretation review for the current upload.
+        review = st.session_state.get("review_evaluation")
+        if review and review.get("file_key") == result.get("file_key"):
+            st.divider()
+            st.subheader("Interpretation review")
+            if review["status"] != "ok":
+                st.error(review["error"])
+            else:
+                rv = review["evaluation"]
+                st.metric("Review confidence", rv["confidence"].title())
+                st.write(rv["feedback"])
+
+                verdict_labels = {"supported": "✅ Supported", "contradicted": "❌ Contradicted",
+                                  "unverifiable": "❔ Cannot be verified",
+                                  "not_in_evidence": "💭 Not shown in the file"}
+                if rv["claims"]:
+                    st.markdown("**Your claims**")
+                    for claim in rv["claims"]:
+                        st.markdown(f"- {verdict_labels[claim['verdict']]}: *{claim['claim']}*  \n"
+                                    f"  {claim['reason']}")
+
+                if rv["misconceptions"]:
+                    st.markdown("**Misconceptions and corrections**")
+                    for item in rv["misconceptions"]:
+                        st.warning(f"**{item['misconception']}**\n\n{item['correction']}")
+
+                if rv["omissions"]:
+                    st.markdown("**What you missed**")
+                    for item in rv["omissions"]:
+                        st.markdown(f"- **{item['what_was_missed']}**: {item['why_it_matters']}")
+
+                if rv["rubric_scores"]:
+                    with st.expander("Rubric"):
+                        for score in rv["rubric_scores"]:
+                            st.markdown(f"- **{score['criterion']}**: "
+                                        f"{score['rating'].replace('_', ' ')}. {score['comment']}")
 
 # Lakeitha Beal: connect coaching_agent.py here.
 elif page == "Coaching Agent":
